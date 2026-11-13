@@ -1,0 +1,71 @@
+/* Continuous chapter reader. Speech is queued automatically; no sentence paging. */
+(()=>{
+  'use strict';
+  let chapter=0,paragraph=0,chunkIndex=0,chunks=[],generation=0,playing=false,paused=false,readingStarted=Date.now(),observer=null,bookOpen=false,bookmark=0,follow=true,pausedForWord=false;
+  const q=s=>document.querySelector(s);
+  const safe=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const words=c=>c.paragraphs.map(p=>p.text).join(' ').split(/\s+/).length;
+  function ensure(){
+    if(!Array.isArray(state.readerCompleted))state.readerCompleted=[];
+    if(!state.readerBookmarks||typeof state.readerBookmarks!=='object')state.readerBookmarks={};
+    state.readerChapter=Number.isInteger(state.readerChapter)&&READING_CHAPTERS[state.readerChapter]?state.readerChapter:0;
+    state.readerFont=Math.max(18,Math.min(32,Number(state.readerFont)||23));
+  }
+  function saveBookmark(){if(!bookOpen)return;ensure();state.readerBookmarks[READING_CHAPTERS[chapter].id]=Math.max(0,Math.min(READING_CHAPTERS[chapter].paragraphs.length-1,bookmark));persist();}
+  function status(text){const e=q('#readerStatus');if(e)e.textContent=text;const p=q('[data-reader-action="pause"]');if(p){p.disabled=!playing;p.textContent=paused?'▶ Resume':'Ⅱ Pause';}const stop=q('[data-reader-action="stop"]');if(stop)stop.disabled=!playing;}
+  function clearHighlights(){document.querySelectorAll('.reader-paragraph.is-speaking').forEach(p=>p.classList.remove('is-speaking'));}
+  function stop(keep=false){
+    const wasReader=playing;generation++;playing=false;paused=false;pausedForWord=false;
+    if(wasReader&&'speechSynthesis'in window)speechSynthesis.cancel();
+    clearHighlights();if(!keep){paragraph=0;chunkIndex=0;}status('Read at your own pace, or listen to the whole chapter.');
+    if(!keep){saveBookmark();observer?.disconnect();observer=null;bookOpen=false;}
+  }
+  function splitForSpeech(text){const sentences=text.match(/[^.!?]+[.!?]+|[^.!?]+$/g)||[text];const out=[];for(const sentence of sentences){let part='';for(const word of sentence.trim().split(/\s+/)){if((part+' '+word).length>230&&part){out.push(part);part=word;}else part+=(part?' ':'')+word;}if(part)out.push(part);}return out;}
+  function speakChunk(token){
+    if(token!==generation||!playing||paused)return;
+    const data=READING_CHAPTERS[chapter];
+    if(paragraph>=data.paragraphs.length){playing=false;paused=false;clearHighlights();status('Chapter finished. Try reading it aloud in your own voice.');paragraph=0;chunkIndex=0;return;}
+    if(!chunks.length)chunks=splitForSpeech(data.paragraphs[paragraph].text);
+    if(chunkIndex>=chunks.length){paragraph++;chunkIndex=0;chunks=[];speakChunk(token);return;}
+    clearHighlights();const element=q(`[data-reader-paragraph="${paragraph}"]`);element?.classList.add('is-speaking');
+    if(element&&chunkIndex===0&&follow)element.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'center'});
+    bookmark=paragraph;status(`Listening · paragraph ${paragraph+1} of ${data.paragraphs.length}`);
+    const u=new SpeechSynthesisUtterance(chunks[chunkIndex]);u.lang='en-US';u.rate=state.speed;
+    const voices=speechSynthesis.getVoices();u.voice=voices.find(v=>v.lang==='en-US')||voices.find(v=>v.lang.startsWith('en'))||null;
+    u.onend=()=>{if(token!==generation||!playing)return;chunkIndex++;if(!paused)speakChunk(token);};
+    u.onerror=e=>{if(token!==generation)return;if(['canceled','interrupted'].includes(e.error)){playing=false;paused=false;clearHighlights();status('Listening stopped. Press “Listen to full chapter” to start again.');return;}stop(true);status('Voice playback failed. You can keep reading, or try a different browser.');};
+    speechSynthesis.speak(u);
+  }
+  function startListening(){
+    if(!('speechSynthesis'in window)){toast('Voice playback is unavailable. The complete chapter is ready to read aloud.');return;}
+    stopRecording();generation++;speechSynthesis.cancel();paragraph=0;chunkIndex=0;chunks=[];playing=true;paused=false;pausedForWord=false;speakChunk(generation);
+  }
+  function pausePlayback(){if(!playing)return;if(paused){paused=false;pausedForWord=false;speechSynthesis.resume();status(`Listening · paragraph ${paragraph+1} of ${READING_CHAPTERS[chapter].paragraphs.length}`);}else{paused=true;speechSynthesis.pause();status('Paused · take your time. Press Resume to continue.');}}
+  function pauseForWord(){if(playing){pausedForWord=true;generation++;speechSynthesis.cancel();playing=false;paused=true;clearHighlights();status('Word help opened. Resume the chapter when you are ready.');}}
+  function resumeAfterWord(){if(!pausedForWord)return;playing=true;paused=true;const p=q('[data-reader-action="pause"]');if(p){p.disabled=false;p.textContent='▶ Resume';}status('Word help finished · press Resume to continue from this part.');}
+  function render(){
+    ensure();chapter=state.readerChapter;paragraph=0;chunkIndex=0;chunks=[];bookmark=0;readingStarted=Date.now();bookOpen=true;
+    const c=READING_CHAPTERS[chapter],count=words(c),completed=state.readerCompleted.includes(c.id);
+    const select= ['Speech','Meeting','Conversation','CEO Story'].map(type=>`<optgroup label="${type==='CEO Story'?'Source-based CEO stories':type+'s · core chapters'}">${READING_CHAPTERS.map((ch,i)=>!ch.generated&&ch.type===type?`<option value="${i}" ${i===chapter?'selected':''}>${String(i+1).padStart(2,'0')} · ${safe(ch.title)}</option>`:'').join('')}</optgroup>`).join('')+(c.generated?`<optgroup label="Current generated variation"><option value="${chapter}" selected>${safe(c.title)}</option></optgroup>`:'');
+    q('#main').innerHTML=`<div class="reader-heading"><div><div class="eyebrow">THE CEO READING ROOM</div><h1>Read the room.<br>Find your voice.</h1><p>Complete speeches, meetings, and conversations. Open a chapter and read it like a book.</p></div><div class="reader-count">${String(READING_CHAPTERS.length).padStart(2,'0')}<span>READING<br>ENTRIES</span></div></div><div class="reader-chooser"><div><label for="readerChapter">Choose your chapter</label><select id="readerChapter">${select}</select></div><a class="btn reader-browse" href="#library">Browse the library ↗</a><span class="reader-completed">${state.readerCompleted.length} / ${READING_CHAPTERS.length} chapters practised</span></div><div class="reader-toolbar" role="region" aria-label="Reading controls"><div class="reader-transport"><button class="btn primary" data-reader-action="listen">▶ Listen to full chapter</button><button class="btn" data-reader-action="pause" disabled>Ⅱ Pause</button><button class="btn" data-reader-action="stop" disabled>■ Stop</button></div><div class="reader-adjust"><label class="reader-rate"><span class="visually-hidden">Listening speed</span><select id="readerSpeed" aria-label="Listening speed"><option value="0.65" ${state.speed===.65?'selected':''}>Slow · 0.65×</option><option value="0.85" ${state.speed===.85?'selected':''}>Gentle · 0.85×</option><option value="1" ${state.speed===1?'selected':''}>Natural · 1×</option></select></label><button class="reader-font-btn" data-reader-action="smaller" aria-label="Decrease text size">A−</button><button class="reader-font-btn" data-reader-action="larger" aria-label="Increase text size">A+</button><label class="reader-follow"><input id="readerFollow" type="checkbox" ${follow?'checked':''}> Follow audio</label></div><div id="readerStatus" class="reader-status" role="status">Read at your own pace, or listen to the whole chapter.</div></div><article class="reader-book" id="readerBook" data-chapter="${safe(c.id)}" style="--reader-font:${state.readerFont}px"><div class="reader-book-top"><span>THE LEADER’S VOICE</span><span>CHAPTER ${String(chapter+1).padStart(2,'0')}</span></div><div class="reader-chapter-head"><span class="badge">${safe(c.type.toUpperCase())} · ${safe(c.level.toUpperCase())}</span><h2>${safe(c.title)}</h2><p>${safe(c.subtitle)}</p><div class="reader-book-meta">${count} words <span>·</span> About ${Math.ceil(count/100)} min aloud <span>·</span> ${c.source?'Source-based summary':c.generated?'Generated scenario variation':'Original practice text'}</div></div><div class="reader-provenance"><span class="badge">${c.source?'SOURCE-BASED SUMMARY':c.generated?'GENERATED PRACTICE VARIATION':'CORE PRACTICE CHAPTER'}</span>${c.source?`<p>Historical summary with a separate original practice reflection. This is not a verbatim speech or an endorsement.</p><a href="${safe(c.source.url)}" target="_blank" rel="noopener noreferrer">Read source: ${safe(c.source.title)} ↗</a>`:c.generated?`<p>Composed from an original situation brief and a decision constraint. This is fictional practice material with a shared modular structure, not a real CEO transcript.</p>`:''}<div class="reader-provenance-actions"><button class="btn" data-library-action="save" data-id="${safe(c.id)}" aria-pressed="${(state.readerSaved||[]).includes(c.id)}">${(state.readerSaved||[]).includes(c.id)?'★ Saved for later':'☆ Save for later'}</button><a class="text-link" href="#methods">Practise with sourced methods ↗</a></div></div><div class="reader-word-note">✦ Click any word for spelling, pronunciation, synonyms &amp; සිංහල තේරුම. All words in this collection have built-in English and Sinhala glosses. Your own new words use online lookup.</div><div class="reader-body">${c.paragraphs.map((p,i)=>`<section class="reader-passage"><span class="reader-speaker">${safe(p.speaker)}</span><p class="reader-paragraph" data-reader-paragraph="${i}">${safe(p.text)}</p></section>`).join('')}</div><div class="reader-end-mark">✦</div><div class="reader-book-bottom"><span>${safe(c.type)} · ${safe(c.skill)}</span><span>${String(chapter+1).padStart(2,'0')} / ${String(READING_CHAPTERS.length).padStart(2,'0')}</span></div></article><section class="reader-reflection card"><span class="eyebrow">FROM READING TO LEADING</span><h2>Make this chapter your own.</h2><p>${safe(c.transfer)}</p><details><summary>How to practise this chapter</summary><div class="reader-coaching"><p><strong>First reading:</strong> Read the complete passage aloud at a comfortable pace. Keep going through the paragraphs; you do not need to click Next.</p><p><strong>Second reading:</strong> Listen to the whole chapter and speak along. ${safe(c.coach)}</p><p><strong>Speak without the text:</strong> ${safe(c.transfer)}</p><p><strong>Communication structure:</strong> ${safe(c.structure)}</p></div></details><details class="reader-recording"><summary>Record your reading &amp; listen back</summary><p>Record a section or your own version. Audio stays in this tab until downloaded. Recordings stop after 3 minutes; start another if you want to practise more.</p>${recordView()}<label for="transcript">Your words or reflection notes</label><textarea id="transcript" placeholder="What felt clear? Where did you need to pause? What would you say in your own business?"></textarea></details><div class="actions"><button class="btn primary" data-reader-action="complete" ${completed?'disabled':''}>${completed?'✓ Chapter practised':'✓ Mark chapter practised'}</button><button class="btn" data-reader-action="next">${chapter===READING_CHAPTERS.length-1?'Back to first chapter ↗':'Next chapter →'}</button></div><p class="reader-small-note">Read once for understanding, again for flow, then close the text and deliver the idea in your own words.</p></section>`;
+    const saved=Number(state.readerBookmarks[c.id])||0;
+    if(saved>0&&saved<c.paragraphs.length){bookmark=saved;setTimeout(()=>{if(bookOpen&&q('#readerBook')?.dataset.chapter===c.id)q(`[data-reader-paragraph="${saved}"]`)?.scrollIntoView({block:'center'});},80);status('Your reading place is saved. Full-chapter audio starts at the beginning.');}
+    if('IntersectionObserver'in window){observer=new IntersectionObserver(entries=>{if(!bookOpen)return;const visible=entries.filter(e=>e.isIntersecting);if(visible.length)bookmark=Number(visible[0].target.dataset.readerParagraph);},{rootMargin:'-25% 0px -45% 0px',threshold:0});document.querySelectorAll('.reader-paragraph').forEach(p=>observer.observe(p));}
+  }
+  function open(index){ensure();resetPractice();state.readerChapter=Math.max(0,Math.min(READING_CHAPTERS.length-1,index));persist();if(location.hash==='#reading'){render();window.scrollTo(0,0);}else location.hash='reading';}
+  document.addEventListener('click',e=>{
+    if(e.target.closest('[data-action="record"]')&&q('#readerBook')){stop(true);}
+    const b=e.target.closest('[data-reader-action]');if(!b)return;
+    switch(b.dataset.readerAction){
+      case'listen':startListening();break;
+      case'pause':if(pausedForWord){pausedForWord=false;playing=true;paused=false;generation++;speakChunk(generation);}else if(playing&&paused&&!speechSynthesis.paused){paused=false;generation++;speakChunk(generation);}else pausePlayback();break;
+      case'stop':stop(true);paragraph=0;chunkIndex=0;chunks=[];break;
+      case'larger':case'smaller':state.readerFont=Math.max(18,Math.min(32,state.readerFont+(b.dataset.readerAction==='larger'?1:-1)));q('#readerBook').style.setProperty('--reader-font',state.readerFont+'px');persist();break;
+      case'complete':{const c=READING_CHAPTERS[chapter];if(!state.readerCompleted.includes(c.id)){state.readerCompleted.push(c.id);addSession('Reading: '+c.title,Math.min(1800,(Date.now()-readingStarted)/1000));b.disabled=true;b.textContent='✓ Chapter practised';q('.reader-completed').textContent=`${state.readerCompleted.length} / ${READING_CHAPTERS.length} chapters practised`;toast('Chapter practice saved. Try the main idea without looking at the text.');}break;}
+      case'next':open((chapter+1)%READING_CHAPTERS.length);break;
+    }
+  });
+  document.addEventListener('change',e=>{if(e.target.id==='readerChapter')open(Number(e.target.value));if(e.target.id==='readerFollow')follow=e.target.checked;if(e.target.id==='readerSpeed'){state.speed=Number(e.target.value);persist();if(playing){generation++;speechSynthesis.cancel();chunkIndex=0;chunks=[];paused=false;speakChunk(generation);}}});
+  window.addEventListener('pagehide',()=>{saveBookmark();stop();});
+  window.CEOReader={render,open,stop,pauseForWord,resumeAfterWord};
+})();
